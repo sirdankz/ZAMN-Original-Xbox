@@ -194,10 +194,10 @@ A signed-in profile is required for online play, chat, and leaderboards.
 
 Gameplay modes:
 
-- **Normal / Savable** ” +1 life every 5 completed levels; Save/Load enabled
-- **Normal / No Save** ” same Normal rules; Save/Load disabled
-- **Hardcore / Savable** ” original gameplay; Save/Load enabled
-- **Hardcore / No Save** ” original gameplay; Save/Load disabled
+- **Normal / Savable**  +1 life every 5 completed levels; Save/Load enabled
+- **Normal / No Save**  same Normal rules; Save/Load disabled
+- **Hardcore / Savable**  original gameplay; Save/Load enabled
+- **Hardcore / No Save**  original gameplay; Save/Load disabled
 
 Leaderboards are split into **Solo Online** and **Co-op Online** categories. Times
 are ranked by deterministic gameplay frames and displayed as `MM:SS.mmm` with the
@@ -205,21 +205,21 @@ server record date.
 
 Host lobby controls:
 
-- **RS Click** ” toggle **ROLLBACK: ENABLED / DISABLED**
+- **RS Click**  toggle **ROLLBACK: ENABLED / DISABLED**
 - **Y** ” Lobby Chat in Public Rooms
 
 During an online session:
 
-- **START + BACK** ” synchronized Save/Load menu
-- **LT + RT + Right Stick Click** ” leave the session and return to the ZAMN title
+- **START + BACK**  synchronized Save/Load menu
+- **LT + RT + Right Stick Click**  leave the session and return to the ZAMN title
 
 ## Repository layout
 
-- `src/` ” native runtime, Xbox platform code, rendering/audio, and online client
+- `src/`  native runtime, Xbox platform code, rendering/audio, and online client
 - `third_party/lakesnes/` ” LakeSnes-derived compatibility/reference components
-- `tools/` ” validation and development utilities
-- `LICENSES/` ” third-party license notices
-- `BUILD_XBOX_RELEASE.ps1` ” public Release build entry point
+- `tools/`  validation and development utilities
+- `LICENSES/`  third-party license notices
+- `BUILD_XBOX_RELEASE.ps1`  public Release build entry point
 
 ## Credits / licensing
 
