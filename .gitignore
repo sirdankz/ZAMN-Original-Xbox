@@ -1,0 +1,35 @@
+# Build outputs
+out/
+*.xbe
+*.iso
+*.obj
+*.obj.d
+*.pdb
+
+# User-provided / generated game data
+*.sfc
+*.smc
+zamn-remastered.zsb
+zamn-r49_5-title-cache.bin
+*.zsv
+ZAMN_SAVES/
+
+# Runtime diagnostics
+*.log
+
+# Editor / OS noise
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+.DS_Store
+__pycache__/
+*.pyc
+
+# Optional user-supplied original manual assets
+manual/*.rgb565
+manual/*.pdf
+manual/*.epub
+manual/.generated-manual.json
+manual/.manual-convert-*/

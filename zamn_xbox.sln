@@ -1,0 +1,197 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Build", "Build", "{847FE0E8-8F98-4AB2-A3E4-E4D83E7B0AA5}"
+	ProjectSection(SolutionItems) = preProject
+		BUILD_PORTABLE_R47.ps1 = BUILD_PORTABLE_R47.ps1
+		BUILD_XBOX_R47_ALL_ENHANCED.ps1 = BUILD_XBOX_R47_ALL_ENHANCED.ps1
+		BUILD_XBOX_R47_NETPLAY.ps1 = BUILD_XBOX_R47_NETPLAY.ps1
+		CHECK_SOURCE.ps1 = CHECK_SOURCE.ps1
+		README.txt = README.txt
+		rxdk.project.json = rxdk.project.json
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{0BE44BD2-6BAC-407D-ACD4-A8C17666B0B4}"
+	ProjectSection(SolutionItems) = preProject
+		tools\make_zamn_sample_bank.py = tools\make_zamn_sample_bank.py
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{4B81117D-0374-48CB-81A6-524C5BCF9CE9}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "third_party", "third_party", "{F690EFED-6F7E-4D99-A5AB-F7D207B254F4}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "lakesnes", "lakesnes", "{B9819C7D-0C19-4EE3-A03C-0B7A0A49B269}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "snes", "snes", "{0E43BE33-2508-476D-B350-76FB15AE6DFA}"
+	ProjectSection(SolutionItems) = preProject
+		third_party\lakesnes\snes\apu.c = third_party\lakesnes\snes\apu.c
+		third_party\lakesnes\snes\apu.h = third_party\lakesnes\snes\apu.h
+		third_party\lakesnes\snes\cart.c = third_party\lakesnes\snes\cart.c
+		third_party\lakesnes\snes\cart.h = third_party\lakesnes\snes\cart.h
+		third_party\lakesnes\snes\cpu.c = third_party\lakesnes\snes\cpu.c
+		third_party\lakesnes\snes\cpu.h = third_party\lakesnes\snes\cpu.h
+		third_party\lakesnes\snes\dma.c = third_party\lakesnes\snes\dma.c
+		third_party\lakesnes\snes\dma.h = third_party\lakesnes\snes\dma.h
+		third_party\lakesnes\snes\dsp.c = third_party\lakesnes\snes\dsp.c
+		third_party\lakesnes\snes\dsp.h = third_party\lakesnes\snes\dsp.h
+		third_party\lakesnes\snes\input.c = third_party\lakesnes\snes\input.c
+		third_party\lakesnes\snes\input.h = third_party\lakesnes\snes\input.h
+		third_party\lakesnes\snes\ppu.c = third_party\lakesnes\snes\ppu.c
+		third_party\lakesnes\snes\ppu.h = third_party\lakesnes\snes\ppu.h
+		third_party\lakesnes\snes\snes.c = third_party\lakesnes\snes\snes.c
+		third_party\lakesnes\snes\snes.h = third_party\lakesnes\snes\snes.h
+		third_party\lakesnes\snes\snes_other.c = third_party\lakesnes\snes\snes_other.c
+		third_party\lakesnes\snes\spc.c = third_party\lakesnes\snes\spc.c
+		third_party\lakesnes\snes\spc.h = third_party\lakesnes\snes\spc.h
+		third_party\lakesnes\snes\statehandler.c = third_party\lakesnes\snes\statehandler.c
+		third_party\lakesnes\snes\statehandler.h = third_party\lakesnes\snes\statehandler.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "analysis", "analysis", "{B073D9FF-A8B9-4B5C-B604-3D8CBA34F147}"
+	ProjectSection(SolutionItems) = preProject
+		src\analysis\cdl.c = src\analysis\cdl.c
+		src\analysis\cdl.h = src\analysis\cdl.h
+		src\analysis\movie.c = src\analysis\movie.c
+		src\analysis\movie.h = src\analysis\movie.h
+		src\analysis\movie_apply.h = src\analysis\movie_apply.h
+		src\analysis\w65816.c = src\analysis\w65816.c
+		src\analysis\w65816.h = src\analysis\w65816.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "assets", "assets", "{E3771DD2-8C77-443A-A36B-FE5DCA22830F}"
+	ProjectSection(SolutionItems) = preProject
+		src\assets\actor.c = src\assets\actor.c
+		src\assets\actor.h = src\assets\actor.h
+		src\assets\gfx.c = src\assets\gfx.c
+		src\assets\gfx.h = src\assets\gfx.h
+		src\assets\level.c = src\assets\level.c
+		src\assets\level.h = src\assets\level.h
+		src\assets\lzss.c = src\assets\lzss.c
+		src\assets\lzss.h = src\assets\lzss.h
+		src\assets\music.c = src\assets\music.c
+		src\assets\music.h = src\assets\music.h
+		src\assets\password.c = src\assets\password.c
+		src\assets\password.h = src\assets\password.h
+		src\assets\rom.c = src\assets\rom.c
+		src\assets\rom.h = src\assets\rom.h
+		src\assets\sprite.c = src\assets\sprite.c
+		src\assets\sprite.h = src\assets\sprite.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "cosim", "cosim", "{CF75C887-1CF8-4992-A4DF-56CFBC1802C4}"
+	ProjectSection(SolutionItems) = preProject
+		src\cosim\cosim.c = src\cosim\cosim.c
+		src\cosim\cosim.h = src\cosim\cosim.h
+		src\cosim\profile.h = src\cosim\profile.h
+		src\cosim\routines.c = src\cosim\routines.c
+		src\cosim\waits.h = src\cosim\waits.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "native", "native", "{28079C52-9CA8-4A02-AA40-4B3671A88E7A}"
+	ProjectSection(SolutionItems) = preProject
+		src\native\audio.c = src\native\audio.c
+		src\native\audio.h = src\native\audio.h
+		src\native\runtime.c = src\native\runtime.c
+		src\native\runtime.h = src\native\runtime.h
+		src\native\video.c = src\native\video.c
+		src\native\video.h = src\native\video.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "netplay", "netplay", "{9A9DF720-4C9B-4AA4-B455-470047004701}"
+	ProjectSection(SolutionItems) = preProject
+		src\netplay\netplay_core.c = src\netplay\netplay_core.c
+		src\netplay\netplay_core.h = src\netplay\netplay_core.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "platform", "platform", "{E0ACF9C4-EB2D-4F2C-BF84-6CC0E0EB3192}"
+	ProjectSection(SolutionItems) = preProject
+		src\platform\xbox\ppu.h = src\platform\xbox\ppu.h
+		src\platform\xbox\profile_xbox.c = src\platform\xbox\profile_xbox.c
+		src\platform\xbox\snes.h = src\platform\xbox\snes.h
+		src\platform\xbox\xbox_audio.cpp = src\platform\xbox\xbox_audio.cpp
+		src\platform\xbox\xbox_d3d.cpp = src\platform\xbox\xbox_d3d.cpp
+		src\platform\xbox\xbox_input.cpp = src\platform\xbox\xbox_input.cpp
+		src\platform\xbox\xbox_main.cpp = src\platform\xbox\xbox_main.cpp
+		src\platform\xbox\xbox_netplay.cpp = src\platform\xbox\xbox_netplay.cpp
+		src\platform\xbox\xbox_netplay.h = src\platform\xbox\xbox_netplay.h
+		src\platform\xbox\xbox_platform.h = src\platform\xbox\xbox_platform.h
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "port", "port", "{49E8BE15-D4F5-4419-BC26-EB7A0118E9CF}"
+	ProjectSection(SolutionItems) = preProject
+		src\port\apu.c = src\port\apu.c
+		src\port\apu.h = src\port\apu.h
+		src\port\bcd.h = src\port\bcd.h
+		src\port\bodies.c = src\port\bodies.c
+		src\port\bodies.h = src\port\bodies.h
+		src\port\boss.c = src\port\boss.c
+		src\port\boss.h = src\port\boss.h
+		src\port\bossbg.c = src\port\bossbg.c
+		src\port\bossbg.h = src\port\bossbg.h
+		src\port\camera.c = src\port\camera.c
+		src\port\camera.h = src\port\camera.h
+		src\port\chase.c = src\port\chase.c
+		src\port\chase.h = src\port\chase.h
+		src\port\cheat.h = src\port\cheat.h
+		src\port\collide.c = src\port\collide.c
+		src\port\collide.h = src\port\collide.h
+		src\port\coroutine.h = src\port\coroutine.h
+		src\port\coverage.c = src\port\coverage.c
+		src\port\coverage.h = src\port\coverage.h
+		src\port\cpu.h = src\port\cpu.h
+		src\port\fade.c = src\port\fade.c
+		src\port\fade.h = src\port\fade.h
+		src\port\floor.c = src\port\floor.c
+		src\port\floor.h = src\port\floor.h
+		src\port\hud.c = src\port\hud.c
+		src\port\hud.h = src\port\hud.h
+		src\port\hw.h = src\port\hw.h
+		src\port\levelmap.c = src\port\levelmap.c
+		src\port\levelmap.h = src\port\levelmap.h
+		src\port\lzss.c = src\port\lzss.c
+		src\port\lzss.h = src\port\lzss.h
+		src\port\monster.c = src\port\monster.c
+		src\port\monster.h = src\port\monster.h
+		src\port\oam.c = src\port\oam.c
+		src\port\oam.h = src\port\oam.h
+		src\port\player.c = src\port\player.c
+		src\port\player_resume.c = src\port\player_resume.c
+		src\port\player_resume.h = src\port\player_resume.h
+		src\port\player.h = src\port\player.h
+		src\port\rng.c = src\port\rng.c
+		src\port\rng.h = src\port\rng.h
+		src\port\sched.c = src\port\sched.c
+		src\port\sched.h = src\port\sched.h
+		src\port\score.c = src\port\score.c
+		src\port\score.h = src\port\score.h
+		src\port\sprite_cache.c = src\port\sprite_cache.c
+		src\port\sprite_cache.h = src\port\sprite_cache.h
+		src\port\step.c = src\port\step.c
+		src\port\step.h = src\port\step.h
+		src\port\terrain.c = src\port\terrain.c
+		src\port\terrain.h = src\port\terrain.h
+		src\port\thread.c = src\port\thread.c
+		src\port\thread.h = src\port\thread.h
+		src\port\trig.c = src\port\trig.c
+		src\port\trig.h = src\port\trig.h
+		src\port\vblank.c = src\port\vblank.c
+		src\port\vblank.h = src\port\vblank.h
+		src\port\walk.c = src\port\walk.c
+		src\port\walk.h = src\port\walk.h
+		src\port\wram.h = src\port\wram.h
+	EndProjectSection
+EndProject
+Global
+	GlobalSection(NestedProjects) = preSolution
+		{B9819C7D-0C19-4EE3-A03C-0B7A0A49B269} = {F690EFED-6F7E-4D99-A5AB-F7D207B254F4}
+		{0E43BE33-2508-476D-B350-76FB15AE6DFA} = {B9819C7D-0C19-4EE3-A03C-0B7A0A49B269}
+		{B073D9FF-A8B9-4B5C-B604-3D8CBA34F147} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{E3771DD2-8C77-443A-A36B-FE5DCA22830F} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{CF75C887-1CF8-4992-A4DF-56CFBC1802C4} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{28079C52-9CA8-4A02-AA40-4B3671A88E7A} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{9A9DF720-4C9B-4AA4-B455-470047004701} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{E0ACF9C4-EB2D-4F2C-BF84-6CC0E0EB3192} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+		{49E8BE15-D4F5-4419-BC26-EB7A0118E9CF} = {4B81117D-0374-48CB-81A6-524C5BCF9CE9}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,985 @@
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "snes.h"
+#include "cpu.h"
+#include "apu.h"
+#include "spc.h"
+#include "dma.h"
+#include "ppu.h"
+#include "cart.h"
+#include "input.h"
+#include "statehandler.h"
+
+#if !defined(XBOX_PORT)
+static const double apuCyclesPerMaster = (32040 * 32) / (1364 * 262 * 60.0);
+static const double apuCyclesPerMasterPal = (32040 * 32) / (1364 * 312 * 50.0);
+#else
+// Exact ratio used by LakeSnes: 32040*32 APU clocks per NTSC/PAL master-frame clocks.
+// Keep it rational on Xbox so the 733 MHz Pentium III never enters x87 in the bus hot path.
+enum { ZAMN_APU_RATIO_NUM = 32040 * 32 };
+enum { ZAMN_APU_RATIO_DEN_NTSC = 1364 * 262 * 60 };
+enum { ZAMN_APU_RATIO_DEN_PAL  = 1364 * 312 * 50 };
+static uint64_t s_perfPpuTicks = 0;
+static uint64_t s_perfApuTicks = 0;
+static uint64_t s_perfTimingFastCycles = 0;
+static uint64_t s_perfTimingScalarCycles = 0;
+static uint32_t s_perfDmaSkips = 0;
+static uint32_t s_perfDmaCalls = 0;
+static uint32_t s_perfMapReadHits = 0;
+static uint32_t s_perfMapReadMisses = 0;
+static uint32_t s_perfMapWriteHits = 0;
+static uint32_t s_perfMapWriteMisses = 0;
+static inline uint64_t snes_perfClock(void) { return __builtin_readcyclecounter(); }
+void snes_perfReset(void) {
+  s_perfPpuTicks = 0;
+  s_perfApuTicks = 0;
+  s_perfTimingFastCycles = 0;
+  s_perfTimingScalarCycles = 0;
+  s_perfDmaSkips = s_perfDmaCalls = 0;
+  s_perfMapReadHits = s_perfMapReadMisses = 0;
+  s_perfMapWriteHits = s_perfMapWriteMisses = 0;
+}
+uint64_t snes_perfPpuTicks(void) { return s_perfPpuTicks; }
+uint64_t snes_perfApuTicks(void) { return s_perfApuTicks; }
+uint64_t snes_perfTimingFastCycles(void) { return s_perfTimingFastCycles; }
+uint64_t snes_perfTimingScalarCycles(void) { return s_perfTimingScalarCycles; }
+uint64_t snes_perfDmaSkips(void) { return s_perfDmaSkips; }
+uint64_t snes_perfDmaCalls(void) { return s_perfDmaCalls; }
+uint64_t snes_perfMapReadHits(void) { return s_perfMapReadHits; }
+uint64_t snes_perfMapReadMisses(void) { return s_perfMapReadMisses; }
+uint64_t snes_perfMapWriteHits(void) { return s_perfMapWriteHits; }
+uint64_t snes_perfMapWriteMisses(void) { return s_perfMapWriteMisses; }
+#endif
+
+static void snes_runCycle(Snes* snes);
+static void snes_catchupApu(Snes* snes);
+static void snes_doAutoJoypad(Snes* snes);
+static uint8_t snes_readReg(Snes* snes, uint16_t adr);
+static void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val);
+static uint8_t snes_rread(Snes* snes, uint32_t adr); // wrapped by read, to set open bus
+static int snes_getAccessTime(Snes* snes, uint32_t adr);
+static void snes_buildAccessTimeLut(Snes* snes, bool fastOnly);
+static inline int snes_accessTimeFast(uint32_t adr);
+#if defined(XBOX_PORT)
+static void snes_buildDirectMap(Snes* snes);
+static inline void snes_handleDmaIfNeeded(Snes* snes, int cycles);
+#endif
+
+/*
+ * OG Xbox / low-end host optimization.
+ *
+ * Access timing only changes on 0x200-byte boundaries (the narrowest region is
+ * $4000-$41ff), so a 32768-entry page table is enough for the whole 24-bit
+ * address space. This replaces the branch-heavy snes_getAccessTime() call on
+ * every CPU read/write with one small cache-friendly lookup.
+ */
+static uint8_t s_accessTimePage[0x8000];
+
+#if defined(XBOX_PORT)
+/*
+ * R19: Snes9x-style 4 KiB direct address map.  Most 65816 accesses in ZAMN
+ * are ordinary LoROM or WRAM accesses; they do not need the full bank/I/O
+ * decision tree.  Null entries deliberately fall back to the existing exact
+ * implementation for PPU/APU/CPU/DMA registers, open bus and cartridge RAM.
+ */
+static const uint8_t* s_directReadPage[0x1000] __attribute__((aligned(32)));
+static uint8_t* s_directWritePage[0x1000] __attribute__((aligned(32)));
+
+static void snes_buildDirectMap(Snes* snes) {
+  memset(s_directReadPage, 0, sizeof(s_directReadPage));
+  memset(s_directWritePage, 0, sizeof(s_directWritePage));
+  for(unsigned page = 0; page < 0x1000; ++page) {
+    const uint32_t base24 = page << 12;
+    const uint8_t bank = (uint8_t)(base24 >> 16);
+    const uint16_t adr = (uint16_t)base24;
+
+    if(bank == 0x7e || bank == 0x7f) {
+      uint8_t* p = snes->ram + (((unsigned)(bank & 1) << 16) | adr);
+      s_directReadPage[page] = p;
+      s_directWritePage[page] = p;
+      continue;
+    }
+    if((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) && adr < 0x2000) {
+      uint8_t* p = snes->ram + adr;
+      s_directReadPage[page] = p;
+      s_directWritePage[page] = p;
+      continue;
+    }
+
+    /* ZAMN is plain LoROM. Only install direct cartridge pages when the
+       current cart really is LoROM; every other cart type retains fallback. */
+    if(snes->cart && snes->cart->type == 1 && snes->cart->rom && snes->cart->romSize) {
+      const bool sramPage = (((bank >= 0x70 && bank < 0x7e) || bank >= 0xf0) &&
+                             adr < 0x8000 && snes->cart->ramSize > 0);
+      const uint8_t lb = bank & 0x7f;
+      if(!sramPage && (adr >= 0x8000 || lb >= 0x40)) {
+        const uint32_t off = (((uint32_t)lb << 15) | (adr & 0x7fffu)) &
+                             (snes->cart->romSize - 1);
+        /* ROMs are expanded to a power of two by snes_loadRom, and the
+           4 KiB page cannot wrap within that allocation. */
+        s_directReadPage[page] = snes->cart->rom + off;
+      }
+    }
+  }
+}
+
+static inline bool snes_dmaPending(const Dma* dma) {
+  return dma->dmaState != 0 || dma->hdmaInitRequested || dma->hdmaRunRequested;
+}
+
+static inline void snes_handleDmaIfNeeded(Snes* snes, int cycles) {
+  if(__builtin_expect(snes_dmaPending(snes->dma), 0)) {
+#if !defined(ZAMN_R20_LIGHT_PROF)
+    ++s_perfDmaCalls;
+#endif
+    dma_handleDma(snes->dma, cycles);
+  } else {
+#if !defined(ZAMN_R20_LIGHT_PROF)
+    ++s_perfDmaSkips;
+#endif
+  }
+}
+#endif
+
+Snes* snes_init(void) {
+  Snes* snes = malloc(sizeof(Snes));
+  snes->cpu = cpu_init(snes, snes_cpuRead, snes_cpuWrite, snes_cpuIdle);
+  snes->apu = apu_init(snes);
+  snes->dma = dma_init(snes);
+  snes->ppu = ppu_init(snes);
+  snes->cart = cart_init(snes);
+  snes->input1 = input_init(snes);
+  snes->input2 = input_init(snes);
+  snes->palTiming = false;
+  // Not in `snes_reset`: a hook is a property of the frontend that installed
+  // it, not of the machine, and a reset does not uninstall the frontend.
+  snes->frameHook = NULL;
+  snes->frameHookCtx = NULL;
+  snes->writeHook = NULL;
+  snes->writeHookCtx = NULL;
+  snes->readHook = NULL;
+  snes->readHookCtx = NULL;
+  snes->stolenCycles = 0;
+  snes->inDma = false;
+  return snes;
+}
+
+void snes_free(Snes* snes) {
+  cpu_free(snes->cpu);
+  apu_free(snes->apu);
+  dma_free(snes->dma);
+  ppu_free(snes->ppu);
+  cart_free(snes->cart);
+  input_free(snes->input1);
+  input_free(snes->input2);
+  free(snes);
+}
+
+void snes_reset(Snes* snes, bool hard) {
+  cpu_reset(snes->cpu, hard);
+  apu_reset(snes->apu);
+  dma_reset(snes->dma);
+  ppu_reset(snes->ppu);
+  input_reset(snes->input1);
+  input_reset(snes->input2);
+  cart_reset(snes->cart);
+  if(hard) memset(snes->ram, 0, sizeof(snes->ram));
+  snes->ramAdr = 0;
+  snes->hPos = 0;
+  snes->vPos = 0;
+  snes->frames = 0;
+  snes->cycles = 0;
+  snes->syncCycle = 0;
+  snes->apuCatchupCycles = 0.0;
+#if defined(XBOX_PORT)
+  snes->apuMasterPending = 0;
+  snes->apuCycleDebtNumerator = 0;
+#endif
+  snes->hIrqEnabled = false;
+  snes->vIrqEnabled = false;
+  snes->nmiEnabled = false;
+  snes->hTimer = 0x1ff;
+  snes->vTimer = 0x1ff;
+  snes->inNmi = false;
+  snes->irqCondition = false;
+  snes->inIrq = false;
+  snes->inVblank = false;
+  memset(snes->portAutoRead, 0, sizeof(snes->portAutoRead));
+  snes->autoJoyRead = false;
+  snes->autoJoyTimer = 0;
+  snes->ppuLatch = false;
+  snes->multiplyA = 0xff;
+  snes->multiplyResult = 0xfe01;
+  snes->divideA = 0xffff;
+  snes->divideResult = 0x101;
+  snes->fastMem = false;
+  snes->openBus = 0;
+  snes_buildAccessTimeLut(snes, false);
+#if defined(XBOX_PORT)
+  snes_buildDirectMap(snes);
+#endif
+}
+
+void snes_handleState(Snes* snes, StateHandler* sh) {
+  sh_handleBools(sh,
+    &snes->palTiming, &snes->hIrqEnabled, &snes->vIrqEnabled, &snes->nmiEnabled, &snes->inNmi, &snes->irqCondition,
+    &snes->inIrq, &snes->inVblank, &snes->autoJoyRead, &snes->ppuLatch, &snes->fastMem, NULL
+  );
+  if(!sh->saving) snes_buildAccessTimeLut(snes, false);
+  sh_handleBytes(sh, &snes->multiplyA, &snes->openBus, NULL);
+  sh_handleWords(sh,
+    &snes->hPos, &snes->vPos, &snes->hTimer, &snes->vTimer,
+    &snes->portAutoRead[0], &snes->portAutoRead[1], &snes->portAutoRead[2], &snes->portAutoRead[3],
+    &snes->autoJoyTimer, &snes->multiplyResult, &snes->divideA, &snes->divideResult, NULL
+  );
+  sh_handleInts(sh, &snes->ramAdr, &snes->frames, NULL);
+  sh_handleLongLongs(sh, &snes->cycles, &snes->syncCycle, NULL);
+  sh_handleDoubles(sh, &snes->apuCatchupCycles, NULL);
+#if defined(XBOX_PORT)
+  // These are derived timing accumulators, not machine-visible state. Restart their
+  // phase cleanly after a load; normal runtime never pays floating-point cost.
+  if(!sh->saving) { snes->apuMasterPending = 0; snes->apuCycleDebtNumerator = 0; }
+#endif
+  sh_handleByteArray(sh, snes->ram, 0x20000);
+  // components
+  cpu_handleState(snes->cpu, sh);
+  dma_handleState(snes->dma, sh);
+  ppu_handleState(snes->ppu, sh);
+  apu_handleState(snes->apu, sh);
+  input_handleState(snes->input1, sh);
+  input_handleState(snes->input2, sh);
+  cart_handleState(snes->cart, sh);
+}
+
+void snes_runFrame(Snes* snes) {
+  // TODO: improve handling of dma's that take up entire vblank / frame
+  // run until we are starting a new frame (leaving vblank)
+  while(snes->inVblank) {
+    cpu_runOpcode(snes->cpu);
+  }
+  // then run until we are at vblank, or we end up at next frame (DMA caused vblank to be skipped)
+  uint32_t frame = snes->frames;
+  while(!snes->inVblank && frame == snes->frames) {
+    cpu_runOpcode(snes->cpu);
+  }
+  snes_catchupApu(snes); // catch up the apu after running
+}
+
+void snes_runCycles(Snes* snes, int cycles) {
+  if(snes->hPos + cycles >= 536 && snes->hPos < 536) {
+    // if we go past 536, add 40 cycles for dram refersh
+    cycles += 40;
+    if(!snes->inDma) snes->stolenCycles += 40;
+  }
+
+  /*
+   * The old ZAMN fork updated this floating-point accumulator once for every
+   * two master clocks. Nothing observes it until snes_catchupApu(), so doing
+   * the same elapsed-time accumulation once per bus-cycle batch removes a
+   * large number of x87 operations without changing SPC catch-up points.
+   */
+#if defined(XBOX_PORT)
+  // Only an integer add per CPU/DMA bus batch. Conversion to APU clocks happens
+  // at the much rarer synchronization points in snes_catchupApu().
+  snes->apuMasterPending += (uint32_t)cycles;
+#else
+  snes->apuCatchupCycles +=
+      (snes->palTiming ? apuCyclesPerMasterPal : apuCyclesPerMaster) *
+      (double)cycles;
+#endif
+
+#if defined(XBOX_PORT)
+  /*
+   * R20 exact event batching.
+   *
+   * The old loop called snes_runCycle() once per two master clocks. For ZAMN
+   * the H/V timer IRQs are normally disabled, so between the handful of
+   * horizontal events there is literally no observable work except advancing
+   * cycles/hPos and the auto-joy timer. Batch only those event-free spans.
+   *
+   * Unlike the experimental R18 shortcut, this loop NEVER jumps over an
+   * event. 0/16/512/1104 are still executed by the original snes_runCycle()
+   * at the exact same hPos, and the line-wrap step is also left scalar. If a
+   * timer IRQ is ever enabled we immediately use the original 2-clock loop.
+   */
+  if(__builtin_expect(!snes->hIrqEnabled && !snes->vIrqEnabled &&
+                      (cycles & 1) == 0, 1)) {
+    int remain = cycles;
+    while(remain > 0) {
+      /* A frame hook or other boundary callback is allowed to change timer
+         IRQ state. If that ever happens, finish this batch through the
+         original cycle-accurate loop. Likewise, clear a previously-latched
+         irqCondition with one real scalar step rather than mutating it here. */
+      if(__builtin_expect(snes->hIrqEnabled || snes->vIrqEnabled ||
+                          snes->irqCondition, 0)) {
+        while(remain > 0) {
+          snes_runCycle(snes);
+#if !defined(ZAMN_R24_RELEASE_FAST)
+          s_perfTimingScalarCycles += 2;
+#endif
+          remain -= 2;
+        }
+        return;
+      }
+
+      const int hp = (int)snes->hPos;
+      int lineEnd;
+      if(!snes->palTiming)
+        lineEnd = (snes->vPos == 240 && !snes->ppu->evenFrame &&
+                   !snes->ppu->frameInterlace) ? 1360 : 1364;
+      else
+        lineEnd = (snes->vPos != 311 || snes->ppu->evenFrame ||
+                   !snes->ppu->frameInterlace) ? 1364 : 1368;
+
+      /* These positions have machine-visible work at the start of the
+         2-clock step. lineEnd-2 is special because that step performs wrap. */
+      if(hp == 0 || hp == 16 || hp == 512 || hp == 1104 || hp == lineEnd - 2) {
+        snes_runCycle(snes);
+#if !defined(ZAMN_R24_RELEASE_FAST)
+        s_perfTimingScalarCycles += 2;
+#endif
+        remain -= 2;
+        continue;
+      }
+
+      int boundary = lineEnd - 2;
+      if(hp < 16) boundary = 16;
+      else if(hp < 512) boundary = 512;
+      else if(hp < 1104) boundary = 1104;
+      if(boundary > lineEnd - 2) boundary = lineEnd - 2;
+
+      int delta = boundary - hp;
+      if(delta > remain) delta = remain;
+      delta &= ~1;
+      if(delta <= 0) {
+        snes_runCycle(snes);
+#if !defined(ZAMN_R24_RELEASE_FAST)
+        s_perfTimingScalarCycles += 2;
+#endif
+        remain -= 2;
+        continue;
+      }
+
+      snes->cycles += (uint64_t)delta;
+      snes->hPos = (uint16_t)(hp + delta);
+      if(snes->autoJoyTimer > 0)
+        snes->autoJoyTimer = delta >= (int)snes->autoJoyTimer
+          ? 0 : (uint16_t)(snes->autoJoyTimer - delta);
+#if !defined(ZAMN_R24_RELEASE_FAST)
+      s_perfTimingFastCycles += (uint64_t)delta;
+#endif
+      remain -= delta;
+    }
+    return;
+  }
+#if !defined(ZAMN_R24_RELEASE_FAST)
+  s_perfTimingScalarCycles += (uint64_t)cycles;
+#endif
+#endif
+
+  for(int i = 0; i < cycles; i += 2) {
+    snes_runCycle(snes);
+  }
+}
+
+void snes_syncCycles(Snes* snes, bool start, int syncCycles) {
+  if(start) {
+    snes->syncCycle = snes->cycles;
+    int count = syncCycles - (snes->cycles % syncCycles);
+    snes_runCycles(snes, count);
+  } else {
+    int count = syncCycles - ((snes->cycles - snes->syncCycle) % syncCycles);
+    snes_runCycles(snes, count);
+  }
+}
+
+static void snes_runCycle(Snes* snes) {
+  snes->cycles += 2;
+  // check for h/v timer irq's
+  bool condition = (
+    (snes->vIrqEnabled || snes->hIrqEnabled) &&
+    (snes->vPos == snes->vTimer || !snes->vIrqEnabled) &&
+    (snes->hPos == snes->hTimer * 4 || !snes->hIrqEnabled)
+  );
+  if(!snes->irqCondition && condition) {
+    snes->inIrq = true;
+    cpu_setIrq(snes->cpu, true);
+  }
+  snes->irqCondition = condition;
+  // handle positional stuff
+  if(snes->hPos == 0) {
+    // end of hblank, do most vPos-tests
+    bool startingVblank = false;
+    if(snes->vPos == 0) {
+      // end of vblank
+      snes->inVblank = false;
+      snes->inNmi = false;
+      if(snes->frameHook) snes->frameHook(snes, snes->frameHookCtx);
+      ppu_handleFrameStart(snes->ppu);
+    } else if(snes->vPos == 225) {
+      // ask the ppu if we start vblank now or at vPos 240 (overscan)
+      startingVblank = !ppu_checkOverscan(snes->ppu);
+    } else if(snes->vPos == 240){
+      // if we are not yet in vblank, we had an overscan frame, set startingVblank
+      if(!snes->inVblank) startingVblank = true;
+    }
+    if(startingVblank) {
+      // if we are starting vblank
+      ppu_handleVblank(snes->ppu);
+      snes->inVblank = true;
+      snes->inNmi = true;
+      if(snes->autoJoyRead) {
+        // TODO: this starts a little after start of vblank
+        snes->autoJoyTimer = 4224;
+        snes_doAutoJoypad(snes);
+      }
+      if(snes->nmiEnabled) {
+        cpu_nmi(snes->cpu);
+      }
+    }
+  } else if(snes->hPos == 16) {
+    if(snes->vPos == 0) snes->dma->hdmaInitRequested = true;
+  } else if(snes->hPos == 512) {
+    // render the line halfway of the screen for better compatibility
+    if(!snes->inVblank && snes->vPos > 0) {
+#if defined(XBOX_PORT) && !defined(ZAMN_R24_RELEASE_FAST)
+      const uint64_t pt0 = snes_perfClock();
+#endif
+      ppu_runLine(snes->ppu, snes->vPos);
+#if defined(XBOX_PORT) && !defined(ZAMN_R24_RELEASE_FAST)
+      s_perfPpuTicks += snes_perfClock() - pt0;
+#endif
+    }
+  } else if(snes->hPos == 1104) {
+    if(!snes->inVblank) snes->dma->hdmaRunRequested = true;
+  }
+  // handle autoJoyRead-timer
+  if(snes->autoJoyTimer > 0) snes->autoJoyTimer -= 2;
+  // increment position
+  snes->hPos += 2;
+  if(!snes->palTiming) {
+    // line 240 of odd frame with no interlace is 4 cycles shorter
+    if((snes->hPos == 1360 && snes->vPos == 240 && !snes->ppu->evenFrame && !snes->ppu->frameInterlace) || snes->hPos == 1364) {
+      snes->hPos = 0;
+      snes->vPos++;
+      // even interlace frame is 263 lines
+      if((snes->vPos == 262 && (!snes->ppu->frameInterlace || !snes->ppu->evenFrame)) || snes->vPos == 263) {
+        snes->vPos = 0;
+        snes->frames++;
+      }
+    }
+  } else {
+    // line 311 of odd frame with interlace is 4 cycles longer
+    if((snes->hPos == 1364 && (snes->vPos != 311 || snes->ppu->evenFrame || !snes->ppu->frameInterlace)) || snes->hPos == 1368) {
+      snes->hPos = 0;
+      snes->vPos++;
+      // even interlace frame is 313 lines
+      if((snes->vPos == 312 && (!snes->ppu->frameInterlace || !snes->ppu->evenFrame)) || snes->vPos == 313) {
+        snes->vPos = 0;
+        snes->frames++;
+      }
+    }
+  }
+}
+
+static void snes_catchupApu(Snes* snes) {
+#if defined(XBOX_PORT)
+  // Carry exact fractional APU time as a signed rational debt. apu_runCycles()
+  // may overshoot to finish an SPC opcode; subtracting the actual cycles keeps
+  // that overshoot as debt for the next synchronization, matching the old
+  // floating accumulator without doing floating point on every bus access.
+  const int64_t den = snes->palTiming ? (int64_t)ZAMN_APU_RATIO_DEN_PAL
+                                      : (int64_t)ZAMN_APU_RATIO_DEN_NTSC;
+  snes->apuCycleDebtNumerator +=
+      (int64_t)snes->apuMasterPending * (int64_t)ZAMN_APU_RATIO_NUM;
+  snes->apuMasterPending = 0;
+  const int wanted = snes->apuCycleDebtNumerator > 0
+      ? (int)(snes->apuCycleDebtNumerator / den) : 0;
+  if(wanted > 0) {
+#if !defined(ZAMN_R24_RELEASE_FAST)
+    const uint64_t at0 = snes_perfClock();
+#endif
+    const int ranCycles = apu_runCycles(snes->apu, wanted);
+#if !defined(ZAMN_R24_RELEASE_FAST)
+    s_perfApuTicks += snes_perfClock() - at0;
+#endif
+    snes->apuCycleDebtNumerator -= (int64_t)ranCycles * den;
+  }
+#else
+  int catchupCycles = (int) snes->apuCatchupCycles;
+  int ranCycles = apu_runCycles(snes->apu, catchupCycles);
+  snes->apuCatchupCycles -= (double) ranCycles;
+#endif
+}
+
+static void snes_doAutoJoypad(Snes* snes) {
+  memset(snes->portAutoRead, 0, sizeof(snes->portAutoRead));
+  // latch controllers
+  input_latch(snes->input1, true);
+  input_latch(snes->input2, true);
+  input_latch(snes->input1, false);
+  input_latch(snes->input2, false);
+  for(int i = 0; i < 16; i++) {
+    uint8_t val = input_read(snes->input1);
+    snes->portAutoRead[0] |= ((val & 1) << (15 - i));
+    snes->portAutoRead[2] |= (((val >> 1) & 1) << (15 - i));
+    val = input_read(snes->input2);
+    snes->portAutoRead[1] |= ((val & 1) << (15 - i));
+    snes->portAutoRead[3] |= (((val >> 1) & 1) << (15 - i));
+  }
+}
+
+uint8_t snes_readBBus(Snes* snes, uint8_t adr) {
+  if(adr < 0x40) {
+    return ppu_read(snes->ppu, adr);
+  }
+  if(adr < 0x80) {
+    snes_catchupApu(snes); // catch up the apu before reading
+    return snes->apu->outPorts[adr & 0x3];
+  }
+  if(adr == 0x80) {
+    uint8_t ret = snes->ram[snes->ramAdr++];
+    snes->ramAdr &= 0x1ffff;
+    return ret;
+  }
+  return snes->openBus;
+}
+
+void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
+  if(adr < 0x40) {
+    ppu_write(snes->ppu, adr, val);
+    return;
+  }
+  if(adr < 0x80) {
+    snes_catchupApu(snes); // catch up the apu before writing
+    snes->apu->inPorts[adr & 0x3] = val;
+#if defined(XBOX_PORT) && defined(ZAMN_R69_PORTING_PROFILE) && defined(ZAMN_R39_BUFFERED_LOG) && !defined(ZAMN_RELEASE_NO_DIAGNOSTICS)
+    apu_r69_cpu_port_write(adr & 0x3u, val);
+#endif
+    return;
+  }
+  switch(adr) {
+    case 0x80: {
+      snes->ram[snes->ramAdr++] = val;
+      snes->ramAdr &= 0x1ffff;
+      break;
+    }
+    case 0x81: {
+      snes->ramAdr = (snes->ramAdr & 0x1ff00) | val;
+      break;
+    }
+    case 0x82: {
+      snes->ramAdr = (snes->ramAdr & 0x100ff) | (val << 8);
+      break;
+    }
+    case 0x83: {
+      snes->ramAdr = (snes->ramAdr & 0x0ffff) | ((val & 1) << 16);
+      break;
+    }
+  }
+}
+
+static uint8_t snes_readReg(Snes* snes, uint16_t adr) {
+  switch(adr) {
+    case 0x4210: {
+      uint8_t val = 0x2; // CPU version (4 bit)
+      val |= snes->inNmi << 7;
+      snes->inNmi = false;
+      return val | (snes->openBus & 0x70);
+    }
+    case 0x4211: {
+      uint8_t val = snes->inIrq << 7;
+      snes->inIrq = false;
+      cpu_setIrq(snes->cpu, false);
+      return val | (snes->openBus & 0x7f);
+    }
+    case 0x4212: {
+      uint8_t val = (snes->autoJoyTimer > 0);
+      val |= (snes->hPos < 4 || snes->hPos >= 1096) << 6;
+      val |= snes->inVblank << 7;
+      return val | (snes->openBus & 0x3e);
+    }
+    case 0x4213: {
+      return snes->ppuLatch << 7; // IO-port
+    }
+    case 0x4214: {
+      return snes->divideResult & 0xff;
+    }
+    case 0x4215: {
+      return snes->divideResult >> 8;
+    }
+    case 0x4216: {
+      return snes->multiplyResult & 0xff;
+    }
+    case 0x4217: {
+      return snes->multiplyResult >> 8;
+    }
+    case 0x4218:
+    case 0x421a:
+    case 0x421c:
+    case 0x421e: {
+      return snes->portAutoRead[(adr - 0x4218) / 2] & 0xff;
+    }
+    case 0x4219:
+    case 0x421b:
+    case 0x421d:
+    case 0x421f: {
+      return snes->portAutoRead[(adr - 0x4219) / 2] >> 8;
+    }
+    default: {
+      return snes->openBus;
+    }
+  }
+}
+
+static void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
+  switch(adr) {
+    case 0x4200: {
+      snes->autoJoyRead = val & 0x1;
+      if(!snes->autoJoyRead) snes->autoJoyTimer = 0;
+      snes->hIrqEnabled = val & 0x10;
+      snes->vIrqEnabled = val & 0x20;
+      if(!snes->hIrqEnabled && !snes->vIrqEnabled) {
+        snes->inIrq = false;
+        cpu_setIrq(snes->cpu, false);
+      }
+      // if nmi is enabled while inNmi is still set, immediately generate nmi
+      if(!snes->nmiEnabled && (val & 0x80) && snes->inNmi) {
+        cpu_nmi(snes->cpu);
+      }
+      snes->nmiEnabled = val & 0x80;
+      break;
+    }
+    case 0x4201: {
+      if(!(val & 0x80) && snes->ppuLatch) {
+        // latch the ppu
+        ppu_read(snes->ppu, 0x37);
+      }
+      snes->ppuLatch = val & 0x80;
+      break;
+    }
+    case 0x4202: {
+      snes->multiplyA = val;
+      break;
+    }
+    case 0x4203: {
+      snes->multiplyResult = snes->multiplyA * val;
+      break;
+    }
+    case 0x4204: {
+      snes->divideA = (snes->divideA & 0xff00) | val;
+      break;
+    }
+    case 0x4205: {
+      snes->divideA = (snes->divideA & 0x00ff) | (val << 8);
+      break;
+    }
+    case 0x4206: {
+      if(val == 0) {
+        snes->divideResult = 0xffff;
+        snes->multiplyResult = snes->divideA;
+      } else {
+        snes->divideResult = snes->divideA / val;
+        snes->multiplyResult = snes->divideA % val;
+      }
+      break;
+    }
+    case 0x4207: {
+      snes->hTimer = (snes->hTimer & 0x100) | val;
+      break;
+    }
+    case 0x4208: {
+      snes->hTimer = (snes->hTimer & 0x0ff) | ((val & 1) << 8);
+      break;
+    }
+    case 0x4209: {
+      snes->vTimer = (snes->vTimer & 0x100) | val;
+      break;
+    }
+    case 0x420a: {
+      snes->vTimer = (snes->vTimer & 0x0ff) | ((val & 1) << 8);
+      break;
+    }
+    case 0x420b: {
+      dma_startDma(snes->dma, val, false);
+      break;
+    }
+    case 0x420c: {
+      dma_startDma(snes->dma, val, true);
+      break;
+    }
+    case 0x420d: {
+      const bool fast = (val & 0x1) != 0;
+      if(snes->fastMem != fast) {
+        snes->fastMem = fast;
+        snes_buildAccessTimeLut(snes, true);
+      }
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+}
+
+static uint8_t snes_rread(Snes* snes, uint32_t adr) {
+#if defined(XBOX_PORT)
+  const uint32_t a24 = adr & 0xffffffu;
+  const uint8_t* direct = s_directReadPage[a24 >> 12];
+  if(__builtin_expect(direct != NULL, 1)) {
+#if !defined(ZAMN_R20_LIGHT_PROF)
+    ++s_perfMapReadHits;
+#endif
+    return direct[a24 & 0xfffu];
+  }
+#if !defined(ZAMN_R20_LIGHT_PROF)
+  ++s_perfMapReadMisses;
+#endif
+#endif
+  uint8_t bank = adr >> 16;
+  adr &= 0xffff;
+  if(bank == 0x7e || bank == 0x7f) {
+    return snes->ram[((bank & 1) << 16) | adr]; // ram
+  }
+  if(bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) {
+    if(adr < 0x2000) {
+      return snes->ram[adr]; // ram mirror
+    }
+    if(adr >= 0x2100 && adr < 0x2200) {
+      return snes_readBBus(snes, adr & 0xff); // B-bus
+    }
+    if(adr == 0x4016) {
+      return input_read(snes->input1) | (snes->openBus & 0xfc);
+    }
+    if(adr == 0x4017) {
+      return input_read(snes->input2) | (snes->openBus & 0xe0) | 0x1c;
+    }
+    if(adr >= 0x4200 && adr < 0x4220) {
+      return snes_readReg(snes, adr); // internal registers
+    }
+    if(adr >= 0x4300 && adr < 0x4380) {
+      return dma_read(snes->dma, adr); // dma registers
+    }
+  }
+  // read from cart
+  return cart_read(snes->cart, bank, adr);
+}
+
+void snes_write(Snes* snes, uint32_t adr, uint8_t val) {
+  snes->openBus = val;
+#if defined(XBOX_PORT)
+  const uint32_t a24 = adr & 0xffffffu;
+  uint8_t* direct = s_directWritePage[a24 >> 12];
+  if(__builtin_expect(direct != NULL, 1)) {
+#if !defined(ZAMN_R20_LIGHT_PROF)
+    ++s_perfMapWriteHits;
+#endif
+    direct[a24 & 0xfffu] = val;
+    return;
+  }
+#if !defined(ZAMN_R20_LIGHT_PROF)
+  ++s_perfMapWriteMisses;
+#endif
+#endif
+  uint8_t bank = adr >> 16;
+  adr &= 0xffff;
+  if(bank == 0x7e || bank == 0x7f) {
+    snes->ram[((bank & 1) << 16) | adr] = val; // ram
+  }
+  if(bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) {
+    if(adr < 0x2000) {
+      snes->ram[adr] = val; // ram mirror
+    }
+    if(adr >= 0x2100 && adr < 0x2200) {
+      snes_writeBBus(snes, adr & 0xff, val); // B-bus
+    }
+    if(adr == 0x4016) {
+      input_latch(snes->input1, val & 1); // input latch
+      input_latch(snes->input2, val & 1);
+    }
+    if(adr >= 0x4200 && adr < 0x4220) {
+      snes_writeReg(snes, adr, val); // internal registers
+    }
+    if(adr >= 0x4300 && adr < 0x4380) {
+      dma_write(snes->dma, adr, val); // dma registers
+    }
+  }
+  // write to cart
+  cart_write(snes->cart, bank, adr, val);
+}
+
+static int snes_getAccessTime(Snes* snes, uint32_t adr) {
+  uint8_t bank = adr >> 16;
+  adr &= 0xffff;
+  if((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) && adr < 0x8000) {
+    // 00-3f,80-bf:0-7fff
+    if(adr < 0x2000 || adr >= 0x6000) return 8; // 0-1fff, 6000-7fff
+    if(adr < 0x4000 || adr >= 0x4200) return 6; // 2000-3fff, 4200-5fff
+    return 12; // 4000-41ff
+  }
+  // 40-7f,co-ff:0000-ffff, 00-3f,80-bf:8000-ffff
+  return (snes->fastMem && bank >= 0x80) ? 6 : 8; // depends on setting in banks 80+
+}
+
+static void snes_buildAccessTimeLut(Snes* snes, bool fastOnly) {
+  int first = fastOnly ? 0x4000 : 0;
+  for(int page = first; page < 0x8000; ++page) {
+    const uint32_t adr = ((uint32_t)page) << 9;
+    s_accessTimePage[page] = (uint8_t)snes_getAccessTime(snes, adr);
+  }
+}
+
+static inline int snes_accessTimeFast(uint32_t adr) {
+  return s_accessTimePage[(adr & 0xffffffu) >> 9];
+}
+
+uint8_t snes_read(Snes* snes, uint32_t adr) {
+  uint8_t val = snes_rread(snes, adr);
+  snes->openBus = val;
+  return val;
+}
+
+void snes_cpuIdle(void* mem, bool waiting) {
+  Snes* snes = (Snes*) mem;
+#if defined(XBOX_PORT)
+  snes_handleDmaIfNeeded(snes, 6);
+#else
+  dma_handleDma(snes->dma, 6);
+#endif
+  snes_runCycles(snes, 6);
+}
+
+uint8_t snes_cpuReadOpcodeFast(void* mem, uint32_t adr) {
+  Snes* snes = (Snes*)mem;
+  const uint32_t a24 = adr & 0xffffffu;
+  const uint8_t bank = (uint8_t)(a24 >> 16);
+  const uint16_t off = (uint16_t)a24;
+
+  /*
+   * Code normally executes from LoROM ($xx:8000-$FFFF, plus upper-bank
+   * mirrors). Those bytes have a simple exact access time and a simple ROM
+   * offset. Keep the generic fallback for RAM/I/O execution, cartridge RAM,
+   * non-LoROM carts, and any unusual execution address.
+   */
+  const bool loRomCode =
+      snes->cart && snes->cart->type == 1 && snes->cart->rom &&
+      snes->cart->romSize &&
+      bank != 0x7e && bank != 0x7f &&
+      (off >= 0x8000 || ((bank & 0x7f) >= 0x40)) &&
+      !((((bank >= 0x70 && bank < 0x7e) || bank >= 0xf0) &&
+          off < 0x8000 && snes->cart->ramSize > 0));
+
+  if(__builtin_expect(loRomCode, 1)) {
+    uint64_t cpuClock = 0;
+    if(__builtin_expect(snes->readHook != NULL, 0))
+      cpuClock = snes->cycles - snes->stolenCycles;
+
+    const int cycles = (snes->fastMem && bank >= 0x80) ? 6 : 8;
+    snes_handleDmaIfNeeded(snes, cycles);
+    snes_runCycles(snes, cycles);
+
+    const uint32_t romOff =
+        ((((uint32_t)(bank & 0x7f)) << 15) | (off & 0x7fffu)) &
+        (snes->cart->romSize - 1);
+    const uint8_t val = snes->cart->rom[romOff];
+    snes->openBus = val;
+    if(__builtin_expect(snes->readHook != NULL, 0))
+      snes->readHook(snes, a24, val, cpuClock, snes->readHookCtx);
+    return val;
+  }
+
+  return snes_cpuRead(mem, a24);
+}
+
+uint8_t snes_cpuRead(void* mem, uint32_t adr) {
+  Snes* snes = (Snes*) mem;
+  const uint32_t a24 = adr & 0xffffffu;
+  const uint8_t bank = (uint8_t)(a24 >> 16);
+  const uint16_t off = (uint16_t)a24;
+  uint64_t cpuClock = 0;
+  if(__builtin_expect(snes->readHook != NULL, 0))
+    cpuClock = snes->cycles - snes->stolenCycles;
+
+#if defined(XBOX_PORT)
+  /*
+   * R22: direct-page and stack WRAM are among ZAMN's hottest interpreted data
+   * paths. Every low-$2000 mirror has fixed 8-master-clock timing and maps
+   * directly to the first 8 KiB of WRAM, so avoid the timing LUT and 4 KiB
+   * address-map lookup entirely.
+   */
+  if(__builtin_expect(((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) &&
+                       off < 0x2000), 1)) {
+    const int cycles = 8;
+    snes_handleDmaIfNeeded(snes, cycles);
+    snes_runCycles(snes, cycles);
+    const uint8_t val = snes->ram[off];
+    snes->openBus = val;
+    if(__builtin_expect(snes->readHook != NULL, 0))
+      snes->readHook(snes, a24, val, cpuClock, snes->readHookCtx);
+    return val;
+  }
+#endif
+
+  const int cycles = snes_accessTimeFast(a24);
+#if defined(XBOX_PORT)
+  snes_handleDmaIfNeeded(snes, cycles);
+#else
+  dma_handleDma(snes->dma, cycles);
+#endif
+  snes_runCycles(snes, cycles);
+  uint8_t val = snes_read(snes, a24);
+  if(__builtin_expect(snes->readHook != NULL, 0))
+    snes->readHook(snes, a24, val, cpuClock, snes->readHookCtx);
+  return val;
+}
+
+void snes_cpuWrite(void* mem, uint32_t adr, uint8_t val) {
+  Snes* snes = (Snes*) mem;
+  const uint32_t a24 = adr & 0xffffffu;
+  const uint8_t bank = (uint8_t)(a24 >> 16);
+  const uint16_t off = (uint16_t)a24;
+  uint64_t cpuClock = 0;
+  if(__builtin_expect(snes->writeHook != NULL, 0))
+    cpuClock = snes->cycles - snes->stolenCycles;
+
+#if defined(XBOX_PORT)
+  if(__builtin_expect(((bank < 0x40 || (bank >= 0x80 && bank < 0xc0)) &&
+                       off < 0x2000), 1)) {
+    const int cycles = 8;
+    snes_handleDmaIfNeeded(snes, cycles);
+    snes_runCycles(snes, cycles);
+    snes->openBus = val;
+    snes->ram[off] = val;
+    if(__builtin_expect(snes->writeHook != NULL, 0))
+      snes->writeHook(snes, a24, val, cpuClock, snes->writeHookCtx);
+    return;
+  }
+#endif
+
+  const int cycles = snes_accessTimeFast(a24);
+#if defined(XBOX_PORT)
+  snes_handleDmaIfNeeded(snes, cycles);
+#else
+  dma_handleDma(snes->dma, cycles);
+#endif
+  snes_runCycles(snes, cycles);
+  snes_write(snes, a24, val);
+  if(__builtin_expect(snes->writeHook != NULL, 0))
+    snes->writeHook(snes, a24, val, cpuClock, snes->writeHookCtx);
+}
+
+// debugging
+
+void snes_runCpuCycle(Snes* snes) {
+  cpu_runOpcode(snes->cpu);
+}
+
+void snes_runSpcCycle(Snes* snes) {
+  // TODO: apu catchup is not aware of this, SPC runs extra cycle(s)
+  spc_runOpcode(snes->apu->spc);
+}
